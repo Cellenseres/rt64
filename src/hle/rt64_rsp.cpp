@@ -90,8 +90,35 @@ namespace RT64 {
         geometryModeStack[0] = G_CLIPPING;
         fogChanged = true;
         lookAtChanged = true;
+        resetS2DState();
 
         clearExtended();
+    }
+
+    void RSP::resetS2DState() {
+        constexpr uint16_t SpriteScaleIdentity = 1024;
+        constexpr int32_t ObjMatrixIdentity = (1 << 16);
+        constexpr uint16_t ObjScaleIdentity = (1 << 10);
+        constexpr int8_t LastCommandNone = -128;
+
+        objRenderMode = 0;
+        S2D.struct_buffer.fill(0);
+        S2D.statuses.fill(0);
+        S2D.data_02AE = LastCommandNone;
+        S2D.sprite2D_buffer.fill(0);
+        S2D.sprite2D_scale_x = SpriteScaleIdentity;
+        S2D.sprite2D_scale_y = SpriteScaleIdentity;
+        S2D.sprite2D_flip_x = 0;
+        S2D.sprite2D_flip_y = 0;
+        S2D.sprite2D_valid = false;
+        S2D.objMtxA = ObjMatrixIdentity;
+        S2D.objMtxB = 0;
+        S2D.objMtxC = 0;
+        S2D.objMtxD = ObjMatrixIdentity;
+        S2D.objMtxX = 0;
+        S2D.objMtxY = 0;
+        S2D.objBaseScaleX = ObjScaleIdentity;
+        S2D.objBaseScaleY = ObjScaleIdentity;
     }
 
     constexpr uint32_t ExtendedMask = 0x80000000U;

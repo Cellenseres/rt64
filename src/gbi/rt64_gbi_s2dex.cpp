@@ -4,6 +4,10 @@
 
 #include "rt64_gbi_s2dex.h"
 
+#include <algorithm>
+#include <array>
+#include <limits>
+
 #include "../include/rt64_extended_gbi.h"
 
 #include "rt64_gbi_extended.h"
@@ -20,15 +24,392 @@ namespace RT64 {
             state->rsp->setObjRenderMode((*dl)->w1);
         }
 
-        void moveWord(State *state, DisplayList **dl) {
-            switch ((*dl)->p0(0, 8)) {
-            case G_MW_GENSTAT:
-                assert(false);
-                break;
+        static uint8_t spriteLoadBlockSiz(uint8_t siz) {
+            switch (siz) {
+            case G_IM_SIZ_4b:
+            case G_IM_SIZ_8b:
+            case G_IM_SIZ_16b:
+                return G_IM_SIZ_16b;
+            case G_IM_SIZ_32b:
+                return G_IM_SIZ_32b;
             default:
-                GBI_F3D::moveWord(state, dl);
+                return siz;
+            }
+        }
+
+        static uint32_t spriteSizBytes(uint8_t siz) {
+            switch (siz) {
+            case G_IM_SIZ_8b:  return 1;
+            case G_IM_SIZ_16b: return 2;
+            case G_IM_SIZ_32b: return 4;
+            default:           return 0;
+            }
+        }
+
+        static uint32_t spriteSizLineBytes(uint8_t siz) {
+            switch (siz) {
+            case G_IM_SIZ_8b:  return 1;
+            case G_IM_SIZ_16b: return 2;
+            case G_IM_SIZ_32b: return 2;
+            default:           return 0;
+            }
+        }
+
+        static uint32_t spriteSizShift(uint8_t siz) {
+            switch (siz) {
+            case G_IM_SIZ_4b:  return 2;
+            case G_IM_SIZ_8b:  return 1;
+            case G_IM_SIZ_16b:
+            case G_IM_SIZ_32b:
+            default:
+                return 0;
+            }
+        }
+
+        static uint32_t spriteSizIncr(uint8_t siz) {
+            switch (siz) {
+            case G_IM_SIZ_4b:  return 3;
+            case G_IM_SIZ_8b:  return 1;
+            case G_IM_SIZ_16b:
+            case G_IM_SIZ_32b:
+            default:
+                return 0;
+            }
+        }
+
+        static uint32_t spriteMaxTexelsPerLoad(uint8_t siz) {
+            switch (siz) {
+            case G_IM_SIZ_4b:  return 8192;
+            case G_IM_SIZ_8b:  return 4096;
+            case G_IM_SIZ_16b: return 2048;
+            case G_IM_SIZ_32b: return 1024;
+            default:           return 2048;
+            }
+        }
+
+        static uint16_t spriteCalcDxt(uint32_t width, uint8_t siz) {
+            if (siz == G_IM_SIZ_4b) {
+                const uint32_t txl2Words = std::max<uint32_t>(1, width / 16);
+                return uint16_t(((1U << 11) + txl2Words - 1) / txl2Words);
+            }
+
+            const uint32_t bytes = spriteSizBytes(siz);
+            const uint32_t txl2Words = std::max<uint32_t>(1, (width * bytes) / 8);
+            return uint16_t(((1U << 11) + txl2Words - 1) / txl2Words);
+        }
+
+        static int16_t clampS16(int32_t v) {
+            constexpr int32_t MinS16 = std::numeric_limits<int16_t>::min();
+            constexpr int32_t MaxS16 = std::numeric_limits<int16_t>::max();
+            return int16_t(std::clamp(v, MinS16, MaxS16));
+        }
+
+        static bool spriteCanUseLoadBlock16(int32_t width) {
+            static constexpr std::array<int32_t, 31> LoadBlock16Widths = {
+                4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 112, 128, 168,
+                192, 224, 256, 336, 384, 448, 512, 672, 768, 896, 1024, 1344, 1536,
+                1792, 2048
+            };
+
+            return std::binary_search(LoadBlock16Widths.begin(), LoadBlock16Widths.end(), width);
+        }
+
+        static bool spriteNeedsYGuardRow(int32_t sy, int32_t ulyBase) {
+            return (sy != 1024) || ((ulyBase & 0x3) != 0);
+        }
+
+        enum class SpriteLoadMethod {
+            Block,
+            Tile
+        };
+
+        static SpriteLoadMethod spriteLoadMethod(uint8_t fmt, uint8_t siz, int32_t width) {
+            if ((fmt == G_IM_FMT_RGBA) && (siz == G_IM_SIZ_16b) && spriteCanUseLoadBlock16(width)) {
+                return SpriteLoadMethod::Block;
+            }
+
+            return SpriteLoadMethod::Tile;
+        }
+
+        void sprite2DBase(State *state, DisplayList **dl) {
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            const uint8_t *spriteBytes = state->fromRDRAM(rdramAddress);
+            memcpy(state->rsp->S2D.sprite2D_buffer.data(), spriteBytes, sizeof(uSprite));
+            state->rsp->S2D.sprite2D_valid = true;
+        }
+
+        void sprite2DScaleFlip(State *state, DisplayList **dl) {
+            state->rsp->S2D.sprite2D_scale_x = std::max<uint16_t>((*dl)->p1(16, 16), 1);
+            state->rsp->S2D.sprite2D_scale_y = std::max<uint16_t>((*dl)->p1(0, 16), 1);
+            state->rsp->S2D.sprite2D_flip_x = ((*dl)->p0(8, 8) != 0) ? 1 : 0;
+            state->rsp->S2D.sprite2D_flip_y = ((*dl)->p0(0, 8) != 0) ? 1 : 0;
+        }
+
+        void sprite2DDraw(State *state, DisplayList **dl) {
+            if (!state->rsp->S2D.sprite2D_valid) {
+                return;
+            }
+
+            RDP *rdp = state->rdp.get();
+            const uSprite *sprite = reinterpret_cast<const uSprite *>(state->rsp->S2D.sprite2D_buffer.data());
+            const uint8_t fmt = sprite->sourceImageFmt;
+            const uint8_t siz = sprite->sourceImageSiz;
+            if (siz > G_IM_SIZ_32b) {
+                return;
+            }
+
+            const int32_t width = std::max<int32_t>(sprite->subImageWidth, 1);
+            const int32_t height = std::max<int32_t>(sprite->subImageHeight, 1);
+            const int32_t stride = std::max<int32_t>(sprite->stride, width);
+            const int32_t sx = std::max<int32_t>(state->rsp->S2D.sprite2D_scale_x, 1);
+            const int32_t sy = std::max<int32_t>(state->rsp->S2D.sprite2D_scale_y, 1);
+            const int32_t ulx = int16_t((*dl)->p1(16, 16));
+            const int32_t ulyBase = int16_t((*dl)->p1(0, 16));
+            const int32_t lrx = ulx + int32_t((uint64_t(width) * 4096ULL + uint32_t(sx) - 1) / uint32_t(sx));
+            if (lrx <= ulx) {
+                return;
+            }
+
+            int16_t baseUls = 0;
+            int16_t baseUlt = 0;
+            uint32_t imageAddress = state->rsp->fromSegmented(sprite->sourceImage);
+            const int32_t offsetS = std::max<int32_t>(sprite->sourceImageOffsetS, 0);
+            const int32_t offsetT = std::max<int32_t>(sprite->sourceImageOffsetT, 0);
+            if (siz == G_IM_SIZ_4b) {
+                const int32_t texelOffset = offsetT * stride + offsetS;
+                imageAddress += uint32_t(texelOffset >> 1);
+                baseUls = int16_t((texelOffset & 1) ? 16 : 0);
+            }
+            else {
+                const uint32_t bytesPerTexel = spriteSizBytes(siz);
+                imageAddress += uint32_t((offsetT * stride + offsetS) * int32_t(bytesPerTexel));
+            }
+
+            const bool flipX = (state->rsp->S2D.sprite2D_flip_x != 0);
+            const bool flipY = (state->rsp->S2D.sprite2D_flip_y != 0);
+            const int16_t dsdx = clampS16(flipX ? -sx : sx);
+            const int16_t dtdy = clampS16(flipY ? -sy : sy);
+            const bool tightStride = (stride == width);
+            const SpriteLoadMethod loadMethod = tightStride ? spriteLoadMethod(fmt, siz, width) : SpriteLoadMethod::Tile;
+            const bool useLoadBlock = (loadMethod == SpriteLoadMethod::Block);
+            const bool useYGuardRow = spriteNeedsYGuardRow(sy, ulyBase);
+            const uint8_t loadSiz = spriteLoadBlockSiz(siz);
+            const uint16_t dxt = spriteCalcDxt(uint32_t(width), siz);
+            const uint32_t renderLineBytes = spriteSizLineBytes(siz);
+            const uint16_t renderLine = uint16_t(((uint32_t(width) * renderLineBytes) + 7) >> 3);
+            const uint16_t renderLrs = uint16_t((width - 1) << 2);
+            const int32_t maxLoadedRows = std::max<int32_t>(1, int32_t(spriteMaxTexelsPerLoad(siz) / uint32_t(width)));
+            const int32_t guardBudget = useYGuardRow ? 2 : 0;
+            const int32_t maxCoreRows = tightStride ? std::max<int32_t>(1, maxLoadedRows - guardBudget) : 1;
+            for (int32_t coreRowStart = 0; coreRowStart < height; coreRowStart += maxCoreRows) {
+                const int32_t coreRows = std::min<int32_t>(maxCoreRows, height - coreRowStart);
+                int32_t loadStart = coreRowStart;
+                int32_t loadEnd = coreRowStart + coreRows;
+                if (useYGuardRow) {
+                    int32_t extraGuardBudget = std::max<int32_t>(0, maxLoadedRows - coreRows);
+                    if ((extraGuardBudget > 0) && (loadStart > 0)) {
+                        loadStart--;
+                        extraGuardBudget--;
+                    }
+
+                    if ((extraGuardBudget > 0) && (loadEnd < height)) {
+                        loadEnd++;
+                    }
+                }
+
+                const int32_t loadedRows = std::max<int32_t>(1, loadEnd - loadStart);
+                const int32_t guardTop = coreRowStart - loadStart;
+
+                uint32_t chunkAddress = imageAddress;
+                if (siz == G_IM_SIZ_4b) {
+                    chunkAddress += uint32_t((loadStart * stride) >> 1);
+                }
+                else {
+                    chunkAddress += uint32_t(loadStart * stride * int32_t(spriteSizBytes(siz)));
+                }
+
+                if (useLoadBlock) {
+                    const int32_t texelCount = width * loadedRows;
+                    const uint16_t loadLrs = uint16_t((((uint32_t(texelCount) + spriteSizIncr(siz)) >> spriteSizShift(siz)) - 1) & 0xFFF);
+                    rdp->setTextureImage(fmt, loadSiz, 1, chunkAddress);
+                    rdp->setTile(G_TX_LOADTILE, fmt, loadSiz, 0, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    rdp->loadBlock(G_TX_LOADTILE, 0, 0, loadLrs, dxt);
+                }
+                else {
+                    rdp->setTextureImage(fmt, siz, uint16_t(stride), chunkAddress);
+                    rdp->setTile(G_TX_LOADTILE, fmt, siz, renderLine, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    rdp->loadTile(G_TX_LOADTILE, 0, 0, renderLrs, uint16_t((loadedRows - 1) << 2));
+                }
+
+                rdp->setTile(G_TX_RENDERTILE, fmt, siz, renderLine, 0, 0, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                rdp->setTileSize(G_TX_RENDERTILE, 0, 0, renderLrs, uint16_t((loadedRows - 1) << 2));
+
+                const int32_t chunkUly = ulyBase + int32_t((uint64_t(coreRowStart) * 4096ULL + uint32_t(sy) - 1) / uint32_t(sy));
+                const int32_t chunkLry = ulyBase + int32_t((uint64_t(coreRowStart + coreRows) * 4096ULL + uint32_t(sy) - 1) / uint32_t(sy));
+                const int16_t uls = flipX ? clampS16((width << 5) + baseUls) : baseUls;
+                const int32_t ultBase = flipY ? (int32_t(baseUlt) + ((guardTop + coreRows) << 5)) : (int32_t(baseUlt) + (guardTop << 5));
+                const int16_t ult = clampS16(ultBase);
+                rdp->drawTexRect(ulx, chunkUly, lrx, chunkLry, G_TX_RENDERTILE, uls, ult, dsdx, dtdy, false);
+            }
+        }
+
+        static void setObjSpriteTile(State *state, const uObjSprite &sprite) {
+            RDP *rdp = state->rdp.get();
+            const uint32_t w = std::max<uint32_t>(sprite.imageW >> 5, 1);
+            const uint32_t h = std::max<uint32_t>(sprite.imageH >> 5, 1);
+            rdp->setTile(
+                G_TX_RENDERTILE,
+                sprite.imageFmt,
+                sprite.imageSiz,
+                sprite.imageStride,
+                sprite.imageAdrs,
+                sprite.imagePal,
+                G_TX_CLAMP | G_TX_NOMIRROR,
+                G_TX_CLAMP | G_TX_NOMIRROR,
+                0,
+                0,
+                0,
+                0
+            );
+            rdp->setTileSize(G_TX_RENDERTILE, 0, 0, uint16_t((w - 1) << 2), uint16_t((h - 1) << 2));
+        }
+
+        static void drawObjRectLike(State *state, const uObjSprite &sprite, bool useMatrix) {
+            RDP *rdp = state->rdp.get();
+
+            const uint32_t rawScaleW = std::max<uint32_t>(sprite.scaleW, 1);
+            const uint32_t rawScaleH = std::max<uint32_t>(sprite.scaleH, 1);
+            const uint32_t scaleW = useMatrix ? std::max<uint32_t>((uint64_t(state->rsp->S2D.objBaseScaleX) * rawScaleW) >> 10, 1) : rawScaleW;
+            const uint32_t scaleH = useMatrix ? std::max<uint32_t>((uint64_t(state->rsp->S2D.objBaseScaleY) * rawScaleH) >> 10, 1) : rawScaleH;
+            const uint32_t imageW = std::max<uint32_t>(sprite.imageW, 1);
+            const uint32_t imageH = std::max<uint32_t>(sprite.imageH, 1);
+
+            int32_t ulx = int16_t(sprite.objX);
+            int32_t uly = int16_t(sprite.objY);
+            int32_t lrx = ulx + int32_t((uint64_t(imageW) * (0x80007FFFULL / scaleW)) >> 24);
+            int32_t lry = uly + int32_t((uint64_t(imageH) * (0x80007FFFULL / scaleH)) >> 24);
+
+            if (useMatrix) {
+                auto tx = [&](int32_t x, int32_t y) -> int32_t {
+                    return int32_t(((int64_t(x) * state->rsp->S2D.objMtxA) + (int64_t(y) * state->rsp->S2D.objMtxB)) >> 16) + state->rsp->S2D.objMtxX;
+                };
+                auto ty = [&](int32_t x, int32_t y) -> int32_t {
+                    return int32_t(((int64_t(x) * state->rsp->S2D.objMtxC) + (int64_t(y) * state->rsp->S2D.objMtxD)) >> 16) + state->rsp->S2D.objMtxY;
+                };
+
+                const int32_t x0 = tx(ulx, uly);
+                const int32_t y0 = ty(ulx, uly);
+                const int32_t x1 = tx(lrx, uly);
+                const int32_t y1 = ty(lrx, uly);
+                const int32_t x2 = tx(ulx, lry);
+                const int32_t y2 = ty(ulx, lry);
+                const int32_t x3 = tx(lrx, lry);
+                const int32_t y3 = ty(lrx, lry);
+
+                ulx = std::min(std::min(x0, x1), std::min(x2, x3));
+                uly = std::min(std::min(y0, y1), std::min(y2, y3));
+                lrx = std::max(std::max(x0, x1), std::max(x2, x3));
+                lry = std::max(std::max(y0, y1), std::max(y2, y3));
+            }
+
+            if ((lrx <= ulx) || (lry <= uly)) {
+                return;
+            }
+
+            setObjSpriteTile(state, sprite);
+
+            int16_t uls = 0;
+            int16_t ult = 0;
+            int16_t dsdx = clampS16(int32_t(rawScaleW));
+            int16_t dtdy = clampS16(int32_t(rawScaleH));
+            if ((sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPS) != 0) {
+                uls = clampS16(int32_t(sprite.imageW));
+                dsdx = clampS16(-int32_t(rawScaleW));
+            }
+
+            if ((sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPT) != 0) {
+                ult = clampS16(int32_t(sprite.imageH));
+                dtdy = clampS16(-int32_t(rawScaleH));
+            }
+
+            rdp->drawTexRect(ulx, uly, lrx, lry, G_TX_RENDERTILE, uls, ult, dsdx, dtdy, false);
+        }
+
+        void objRectangleOrMoveMem(State *state, DisplayList **dl) {
+            if (isObjDma0Command(*dl)) {
+                objRectangle(state, dl);
+            }
+            else {
+                GBI_F3D::moveMem(state, dl);
+            }
+        }
+
+        void objSpriteOrVertex(State *state, DisplayList **dl) {
+            if (isObjDma0Command(*dl)) {
+                objSprite(state, dl);
+            }
+            else {
+                GBI_F3D::vertex(state, dl);
+            }
+        }
+
+        void objMoveMem(State *state, DisplayList **dl) {
+            switch ((*dl)->p0(16, 8)) {
+            case S2DEX_MV_MATRIX: {
+                const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+                const uObjMtx *objMtx = reinterpret_cast<const uObjMtx *>(state->fromRDRAM(rdramAddress));
+                state->rsp->S2D.objMtxA = objMtx->A;
+                state->rsp->S2D.objMtxB = objMtx->B;
+                state->rsp->S2D.objMtxC = objMtx->C;
+                state->rsp->S2D.objMtxD = objMtx->D;
+                state->rsp->S2D.objMtxX = objMtx->X;
+                state->rsp->S2D.objMtxY = objMtx->Y;
+                state->rsp->S2D.objBaseScaleX = std::max<uint16_t>(objMtx->baseScaleX, 1);
+                state->rsp->S2D.objBaseScaleY = std::max<uint16_t>(objMtx->baseScaleY, 1);
                 break;
             }
+            case S2DEX_MV_SUBMATRIX: {
+                const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+                const uObjSubMtx *objMtx = reinterpret_cast<const uObjSubMtx *>(state->fromRDRAM(rdramAddress));
+                state->rsp->S2D.objMtxX = objMtx->X;
+                state->rsp->S2D.objMtxY = objMtx->Y;
+                state->rsp->S2D.objBaseScaleX = std::max<uint16_t>(objMtx->baseScaleX, 1);
+                state->rsp->S2D.objBaseScaleY = std::max<uint16_t>(objMtx->baseScaleY, 1);
+                break;
+            }
+            case S2DEX_MV_VIEWPORT:
+                state->rsp->setViewport((*dl)->w1);
+                break;
+            default:
+                break;
+            }
+        }
+
+        void objRectangle(State *state, DisplayList **dl) {
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            const uint8_t *spriteBytes = state->fromRDRAM(rdramAddress);
+            const uObjSprite *sprite = reinterpret_cast<const uObjSprite *>(spriteBytes);
+            drawObjRectLike(state, *sprite, false);
+        }
+
+        void objRectangleR(State *state, DisplayList **dl) {
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            const uObjSprite *sprite = reinterpret_cast<const uObjSprite *>(state->fromRDRAM(rdramAddress));
+            drawObjRectLike(state, *sprite, true);
+        }
+
+        void objSprite(State *state, DisplayList **dl) {
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            const uObjSprite *sprite = reinterpret_cast<const uObjSprite *>(state->fromRDRAM(rdramAddress));
+            drawObjRectLike(state, *sprite, true);
+        }
+
+        void moveWord(State *state, DisplayList **dl) {
+            if (storeMoveWordStatus(state, *dl)) {
+                return;
+            }
+
+            GBI_F3D::moveWord(state, dl);
         }
 
         void rdpHalf0(State *state, DisplayList **dl) {
@@ -464,10 +845,6 @@ namespace RT64 {
 #       endif
         }
 
-        uint32_t extractBits(uint32_t word, uint8_t pos, uint8_t bits) {
-            return ((word >> pos) & ((0x01 << bits) - 1));
-        }
-
         void readS2DStruct(State *state, uint32_t ptr, uint32_t loadSize) {
             // Convert the segmented obj pointer
             uint32_t rdramAddress = state->rsp->fromSegmentedMasked(ptr);
@@ -484,15 +861,19 @@ namespace RT64 {
             // Maybe used for tracking what the most recent command was so it can insert syncs as needed?
             int32_t r1 = state->rsp->S2D.data_02AE;
 
-            uint32_t sid = (uint8_t)(obj->sid);
+            const uint16_t sid = uint16_t(uint8_t(obj->block.sid));
             // Must be divisible by 4 and no more than 12 to work correctly.
             // Technically the RSP does support unaligned reads/writes, so perfect simulation would require ditching the divisibility
             // requirement and handling those cases correctly. Handling values above 12 is basically impossible because it would
             // depend on dmem overrun.
-            assert((sid & 0b11) == 0 && sid <= 12);
+            const bool validSid = ((sid <= S2DEX_STATUS_MAX_SID) && ((sid & S2DEX_STATUS_SID_ALIGNMENT_MASK) == 0));
+            assert(validSid);
+            if (!validSid) {
+                return;
+            }
 
-            uint32_t mask = obj->mask;
-            uint32_t flag = obj->flag;
+            const uint32_t mask = obj->block.mask;
+            const uint32_t flag = obj->block.flag;
             // Get the status for the given id.
             uint32_t status = state->rsp->S2D.statuses[sid / 4];
 
@@ -506,42 +887,44 @@ namespace RT64 {
                     // RDP Tile Sync, not needed
                 }
 
-                uint32_t tsize = obj->val1;
-                state->rdp->setTextureImage(G_IM_FMT_RGBA, G_IM_SIZ_16b, tsize + 1, state->rsp->fromSegmented(obj->image));
+                RDP *rdp = state->rdp.get();
+                const uint32_t imageAddress = state->rsp->fromSegmented(obj->block.image);
+                switch (obj->block.type) {
+                case S2DEX_TXTR_TYPE_LOADBLOCK: {
+                    const uint16_t tsize = obj->block.tsize;
+                    rdp->setTextureImage(G_IM_FMT_RGBA, G_IM_SIZ_16b, tsize + 1, imageAddress);
+                    rdp->setTile(G_TX_LOADTILE, G_IM_FMT_RGBA, G_IM_SIZ_16b, 0, obj->block.tmem, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    if (r1 >= 0) {
+                        // RDP Load Sync, not needed
+                    }
 
-                // The most accurate way to implement this is to combine the calculated fields as the RSP does and then decode them as the RDP would.
-                uint32_t type_mask = (int8_t)(obj->type >> 16); // The cast to signed is very important here, as sign extension is required.
-                uint32_t w0_part1 = ((tsize + 1) & type_mask) << 7;
-                uint32_t w0_part2 = ((uint8_t)(obj->type >> 8)) << 16;
-                uint32_t settile_w0 = obj->tmem | w0_part1 | w0_part2; // combined settile w0
-                uint32_t fmt = extractBits(settile_w0, 21, 3);
-                uint32_t siz = extractBits(settile_w0, 19, 2);
-                uint32_t line = extractBits(settile_w0, 9, 9);
-                uint32_t tmem = extractBits(settile_w0, 0, 9);
-
-                state->rdp->setTile(G_TX_LOADTILE, fmt, siz, line, tmem, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
-
-                if (r1 >= 0) {
-                    // RDP Load Sync, not needed
+                    rdp->loadBlock(G_TX_LOADTILE, 0, 0, uint16_t(obj->block.tsize << 2), obj->block.tline);
+                    break;
                 }
+                case S2DEX_TXTR_TYPE_LOADTILE: {
+                    const uint16_t twidth = obj->tile.twidth;
+                    rdp->setTextureImage(G_IM_FMT_RGBA, G_IM_SIZ_16b, twidth + 1, imageAddress);
+                    rdp->setTile(G_TX_LOADTILE, G_IM_FMT_RGBA, G_IM_SIZ_16b, uint16_t((twidth + 1) >> 2), obj->tile.tmem, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    if (r1 >= 0) {
+                        // RDP Load Sync, not needed
+                    }
 
-                // Same deal as above, but we need to decode differently depending on the command.
-                uint32_t load_w1 = ((tsize << 14) | obj->val2) & 0x00FFFFFF;
-                // These command ids are masked by 0x3F because the RDP ignores the top two bits.
-                uint32_t load_command_id = obj->type & 0x3F;
-                if (load_command_id == (G_LOADBLOCK & 0x3F)) {
-                    uint32_t lrs = extractBits(load_w1, 12, 12);
-                    uint32_t dxt = extractBits(load_w1, 0, 12);
-                    state->rdp->loadBlock(G_TX_LOADTILE, 0, 0, lrs, dxt);
-                } else if (load_command_id == (G_LOADTILE & 0x3F)) {
-                    uint32_t lrs = extractBits(load_w1, 12, 12);
-                    uint32_t lrt = extractBits(load_w1, 0, 12);
-                    state->rdp->loadTile(G_TX_LOADTILE, 0, 0, lrs, lrt);
-                } else if (load_command_id == (G_LOADTLUT & 0x3F)) {
-                    uint32_t lrs = extractBits(load_w1, 12, 12);
-                    state->rdp->loadTLUT(G_TX_LOADTILE, 0, 0, lrs, 0);
-                } else {
+                    rdp->loadTile(G_TX_LOADTILE, 0, 0, uint16_t(obj->tile.twidth << 2), obj->tile.theight);
+                    break;
+                }
+                case S2DEX_TXTR_TYPE_LOADTLUT: {
+                    rdp->setTextureImage(G_IM_FMT_RGBA, G_IM_SIZ_16b, 1, imageAddress);
+                    rdp->setTile(G_TX_LOADTILE, G_IM_FMT_RGBA, G_IM_SIZ_4b, 0, obj->tlut.phead, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    if (r1 >= 0) {
+                        // RDP Load Sync, not needed
+                    }
+
+                    rdp->loadTLUT(G_TX_LOADTILE, 0, 0, uint16_t(obj->tlut.pnum << 2), 0);
+                    break;
+                }
+                default:
                     assert(false && "Invalid sprite load command");
+                    break;
                 }
             }
         }
@@ -554,7 +937,7 @@ namespace RT64 {
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
             
             // Execute the texture load
-            const uObjTxSprite* obj = (uObjTxSprite*)state->rsp->S2D.struct_buffer.data();
+            const uObjTxSprite *obj = reinterpret_cast<const uObjTxSprite *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxtr::end(0x%08X)", (*dl)->w1);
@@ -569,12 +952,9 @@ namespace RT64 {
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
             
             // Execute the texture load
-            const uObjTxSprite* obj = (uObjTxSprite*)state->rsp->S2D.struct_buffer.data();
+            const uObjTxSpriteFull* obj = reinterpret_cast<const uObjTxSpriteFull *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
-            
-            // Execute the sprite draw
-            // TODO call doObjSprite(state, &obj->sprite) when it's implemented
-            assert(false);
+            drawObjRectLike(state, obj->sprite, true);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxSprite::end(0x%08X)", (*dl)->w1);
         #endif
@@ -588,12 +968,9 @@ namespace RT64 {
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
             
             // Execute the texture load
-            const uObjTxSprite* obj = (uObjTxSprite*)state->rsp->S2D.struct_buffer.data();
+            const uObjTxSpriteFull* obj = reinterpret_cast<const uObjTxSpriteFull *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
-            
-            // Execute the rect draw
-            // TODO call doObjRectangle(state, &obj->sprite) when it's implemented
-            assert(false);
+            drawObjRectLike(state, obj->sprite, false);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxRect::end(0x%08X)", (*dl)->w1);
         #endif
@@ -607,19 +984,16 @@ namespace RT64 {
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
 
             // Execute the texture load
-            const uObjTxSprite* obj = (uObjTxSprite*)state->rsp->S2D.struct_buffer.data();
+            const uObjTxSpriteFull* obj = reinterpret_cast<const uObjTxSpriteFull *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
-            
-            // Execute the rect r draw
-            // TODO call doObjRectangleR(state, &obj->sprite) when it's implemented
-            assert(false);
+            drawObjRectLike(state, obj->sprite, true);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxRectR::end(0x%08X)", (*dl)->w1);
         #endif
         }
 
         void reset(State *state) {
-            state->rsp->objRenderMode = 0x0;
+            state->rsp->resetS2DState();
         }
 
         void setup(GBI *gbi) {
@@ -638,7 +1012,17 @@ namespace RT64 {
             };
 
             gbi->map[F3D_G_SPNOOP] = &GBI_EXTENDED::noOpHook;
+            gbi->map[S2DEX_G_OBJ_RECTANGLE] = &objRectangleOrMoveMem;
+            gbi->map[S2DEX_G_OBJ_SPRITE] = &objSpriteOrVertex;
+            gbi->map[S2DEX_G_OBJ_MOVEMEM] = &objMoveMem;
+            gbi->map[F3D_G_SPRITE2D_BASE] = &sprite2DBase;
+            gbi->map[F3D_G_CULLDL] = &sprite2DScaleFlip;
+            gbi->map[F3D_G_POPMTX] = &sprite2DDraw;
+            gbi->map[F3D_G_TEXTURE] = &GBI_F3D::texture;
+            gbi->map[F3D_G_SETGEOMETRYMODE] = &GBI_F3D::setGeometryMode;
+            gbi->map[F3D_G_CLEARGEOMETRYMODE] = &GBI_F3D::clearGeometryMode;
             gbi->map[S2DEX_G_OBJ_RENDERMODE] = &objRenderMode;
+            gbi->map[S2DEX_G_OBJ_RECTANGLE_R] = &objRectangleR;
             gbi->map[S2DEX_G_BG_1CYC] = &bg1Cyc;
             gbi->map[S2DEX_G_BG_COPY] = &bgCopy;
             gbi->map[S2DEX_G_OBJ_LOADTXTR] = &objLoadTxtr;

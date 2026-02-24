@@ -13,15 +13,39 @@
 
 namespace RT64 {
     namespace GBI_S2DEX2 {
-        void moveWord(State *state, DisplayList **dl) {
-            switch ((*dl)->p0(16, 8)) {
-            case G_MW_GENSTAT:
-                assert(false);
-                break;
-            default:
-                GBI_F3DEX2::moveWord(state, dl);
-                break;
+        void objRectangleOrVertex(State *state, DisplayList **dl) {
+            if (GBI_S2DEX::isObjDma0Command(*dl)) {
+                GBI_S2DEX::objRectangle(state, dl);
             }
+            else {
+                GBI_F3DEX2::vertex(state, dl);
+            }
+        }
+
+        void objSpriteOrModifyVtx(State *state, DisplayList **dl) {
+            if (GBI_S2DEX::isObjDma0Command(*dl)) {
+                GBI_S2DEX::objSprite(state, dl);
+            }
+            else {
+                GBI_F3DEX::modifyVertex(state, dl);
+            }
+        }
+
+        void objMoveMemOrF3DEX2MoveMem(State *state, DisplayList **dl) {
+            if (GBI_S2DEX::isObjMoveMemCommand(*dl)) {
+                GBI_S2DEX::objMoveMem(state, dl);
+            }
+            else {
+                GBI_F3DEX2::moveMem(state, dl);
+            }
+        }
+
+        void moveWord(State *state, DisplayList **dl) {
+            if (GBI_S2DEX::storeMoveWordStatus(state, *dl)) {
+                return;
+            }
+
+            GBI_F3DEX2::moveWord(state, dl);
         }
 
         void rdpHalf0(State *state, DisplayList **dl) {
@@ -34,18 +58,16 @@ namespace RT64 {
             }
         }
 
+        static void resetCommon(State *state) {
+            state->rsp->resetS2DState();
+        }
+
         void reset(State *state) {
-            state->rsp->objRenderMode = 0x0;
-            state->rsp->S2D.struct_buffer.fill(0);
-            state->rsp->S2D.statuses.fill(0);
-            state->rsp->S2D.data_02AE = -128;
+            resetCommon(state);
         }
 
         void resetFromLoad(State* state) {
-            state->rsp->objRenderMode = 0x0;
-            state->rsp->S2D.struct_buffer.fill(0);
-            state->rsp->S2D.statuses.fill(0);
-            state->rsp->S2D.data_02AE = -128;
+            resetCommon(state);
         }
 
         void setup(GBI *gbi) {
@@ -64,7 +86,16 @@ namespace RT64 {
             };
 
             gbi->map[F3DEX2_G_SPNOOP] = &GBI_EXTENDED::noOpHook;
+            gbi->map[F3DEX2_G_CULLDL] = &GBI_F3DEX::cullDl;
+            gbi->map[F3DEX2_G_TEXTURE] = &GBI_F3DEX2::texture;
+            gbi->map[F3DEX2_G_POPMTX] = &GBI_F3DEX2::popMatrix;
+            gbi->map[F3DEX2_G_GEOMETRYMODE] = &GBI_F3DEX2::geometryMode;
+            gbi->map[F3DEX2_G_MTX] = &GBI_F3DEX2::matrix;
+            gbi->map[S2DEX2_G_OBJ_RECTANGLE] = &objRectangleOrVertex;
+            gbi->map[S2DEX2_G_OBJ_SPRITE] = &objSpriteOrModifyVtx;
+            gbi->map[S2DEX2_G_OBJ_MOVEMEM] = &objMoveMemOrF3DEX2MoveMem;
             gbi->map[S2DEX2_G_OBJ_RENDERMODE] = &GBI_S2DEX::objRenderMode;
+            gbi->map[S2DEX2_G_OBJ_RECTANGLE_R] = &GBI_S2DEX::objRectangleR;
             gbi->map[S2DEX2_G_BG_1CYC] = &GBI_S2DEX::bg1Cyc;
             gbi->map[S2DEX2_G_BG_COPY] = &GBI_S2DEX::bgCopy;
             gbi->map[S2DEX2_G_OBJ_LOADTXTR] = &GBI_S2DEX::objLoadTxtr;

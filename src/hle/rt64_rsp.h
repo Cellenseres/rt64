@@ -194,6 +194,21 @@ namespace RT64 {
             std::array<uint32_t, 4> statuses;
             // Seems to hold an id corresponding to the last command run.
             int8_t data_02AE;
+            // State for legacy gSPSprite2D* commands (S2D ucodes).
+            std::array<uint8_t, 32> sprite2D_buffer;
+            uint16_t sprite2D_scale_x;
+            uint16_t sprite2D_scale_y;
+            uint8_t sprite2D_flip_x;
+            uint8_t sprite2D_flip_y;
+            bool sprite2D_valid;
+            int32_t objMtxA;
+            int32_t objMtxB;
+            int32_t objMtxC;
+            int32_t objMtxD;
+            int16_t objMtxX;
+            int16_t objMtxY;
+            uint16_t objBaseScaleX;
+            uint16_t objBaseScaleY;
         } S2D;
 
         struct {
@@ -230,6 +245,7 @@ namespace RT64 {
 
         RSP(State *state);
         void reset();
+        void resetS2DState();
         Projection::Type getCurrentProjectionType() const;
         void addCurrentProjection(Projection::Type type);
         template<uint32_t mask> uint32_t maskPhysicalAddress(uint32_t address);

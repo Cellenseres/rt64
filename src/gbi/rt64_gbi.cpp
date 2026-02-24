@@ -128,10 +128,10 @@ namespace RT64 {
     const GBIInstance   F3DZEX2_NON_FIFO_2_06H    = { "F3DZEX2.NoN.fifo 2.06H",                    GBIUCode::F3DZEX2,     { false,  true,   false,  false,  false } };
     const GBIInstance   F3DZEX2_NON_FIFO_2_08I    = { "F3DZEX2.NoN.fifo 2.08I",                    GBIUCode::F3DZEX2,     { false,  true,   false,  false,  true  } };
     const GBIInstance   F3DZEX2_NON_FIFO_2_08J    = { "F3DZEX2.NoN.fifo 2.08J",                    GBIUCode::F3DZEX2,     { false,  true,   false,  false,  true  } };
-    const GBIInstance   S2D                       = { "2.0H, 02-12-97 (S2D)",                      GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
-    const GBIInstance   S2D_A                     = { "2.0H, 02-12-97 (S2D Variant)",              GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
-    const GBIInstance   S2D_FIFO                  = { "2.0H, 02-12-97 (S2D.fifo)",                 GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
-    const GBIInstance   S2D_FIFO_A                = { "2.0H, 02-12-97 (S2D.fifo Variant)",         GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
+    const GBIInstance   S2D                       = { "2.0H, 02-12-97 (S2D)",                      GBIUCode::S2DEX,       { false,  false,  false,  false,  false } };
+    const GBIInstance   S2D_A                     = { "2.0H, 02-12-97 (S2D Variant)",              GBIUCode::S2DEX,       { false,  false,  false,  false,  false } };
+    const GBIInstance   S2D_FIFO                  = { "2.0H, 02-12-97 (S2D.fifo)",                 GBIUCode::S2DEX,       { false,  false,  false,  false,  false } };
+    const GBIInstance   S2D_FIFO_A                = { "2.0H, 02-12-97 (S2D.fifo Variant)",         GBIUCode::S2DEX,       { false,  false,  false,  false,  false } };
     const GBIInstance   S2DEX_1_03                = { "S2DEX 1.03",                                GBIUCode::S2DEX,       { false,  false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   S2DEX_1_05                = { "S2DEX 1.05",                                GBIUCode::S2DEX,       { false,  false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   S2DEX_1_06                = { "S2DEX 1.06",                                GBIUCode::S2DEX,       { false,  false,  false,  false,  false } }; // Needs confirmation.
