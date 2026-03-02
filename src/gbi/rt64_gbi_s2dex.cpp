@@ -46,6 +46,26 @@ namespace RT64 {
             }
         }
 
+        static bool spriteSupportsFullReplacementHash(uint8_t siz, int32_t width, int32_t height, int32_t stride, int32_t offsetS, int32_t offsetT) {
+            if ((siz == G_IM_SIZ_4b) || (width <= 0) || (height <= 0)) {
+                return false;
+            }
+
+            // Restrict this to large contiguous sprites so replacement hashes stay useful for
+            // fullscreen/background art instead of every small UI element.
+            return (stride == width) && (offsetS == 0) && (offsetT == 0) && ((width * height) >= 16384);
+        }
+
+        static bool beginFullReplacementSprite(State *state, RDP *rdp, uint8_t fmt, uint8_t siz, uint32_t imageAddress, uint16_t width,
+            uint16_t renderLine, uint16_t renderLrs, uint16_t renderLrt, uint64_t &replacementHash)
+        {
+            rdp->setTextureImage(fmt, siz, width, imageAddress);
+            rdp->setTile(G_TX_LOADTILE, fmt, siz, renderLine, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+            rdp->loadTileReplacementCheck(G_TX_LOADTILE, 0, 0, renderLrs, renderLrt, siz, fmt, 0, 0, replacementHash);
+            state->startSpriteCommand(replacementHash);
+            return state->ext.textureCache->hasReplacement(replacementHash);
+        }
+
         static uint32_t spriteSizLineBytes(uint8_t siz) {
             switch (siz) {
             case G_IM_SIZ_8b:  return 1;
@@ -166,6 +186,7 @@ namespace RT64 {
             const int32_t ulx = int16_t((*dl)->p1(16, 16));
             const int32_t ulyBase = int16_t((*dl)->p1(0, 16));
             const int32_t lrx = ulx + int32_t((uint64_t(width) * 4096ULL + uint32_t(sx) - 1) / uint32_t(sx));
+            const int32_t totalLry = ulyBase + int32_t((uint64_t(height) * 4096ULL + uint32_t(sy) - 1) / uint32_t(sy));
             if (lrx <= ulx) {
                 return;
             }
@@ -189,6 +210,22 @@ namespace RT64 {
             const bool flipY = (state->rsp->S2D.sprite2D_flip_y != 0);
             const int16_t dsdx = clampS16(flipX ? -sx : sx);
             const int16_t dtdy = clampS16(flipY ? -sy : sy);
+
+            int32_t effective_lrx = lrx;
+            int16_t effective_dsdx = dsdx;
+            if (!flipX) {
+                const FixedRect &scissorRect = rdp->scissorRectStack[rdp->scissorStackSize - 1];
+                const int32_t native_width = rdp->colorImage.width * 4;
+                const int32_t native_height = 240 * 4; // N64 native height in 4x fixed-point
+                const bool depthSourcePrim = (rdp->otherMode.zSource() == G_ZS_PRIM);
+                if (depthSourcePrim
+                    && (ulx <= 0) && (lrx >= native_width) && (scissorRect.lrx > native_width)
+                    && (ulyBase <= 0) && (totalLry >= native_height)) {
+                    effective_lrx = scissorRect.lrx;
+                    effective_dsdx = clampS16(int32_t((int64_t(dsdx) * lrx) / scissorRect.lrx));
+                }
+            }
+
             const bool tightStride = (stride == width);
             const SpriteLoadMethod loadMethod = tightStride ? spriteLoadMethod(fmt, siz, width) : SpriteLoadMethod::Tile;
             const bool useLoadBlock = (loadMethod == SpriteLoadMethod::Block);
@@ -198,9 +235,32 @@ namespace RT64 {
             const uint32_t renderLineBytes = spriteSizLineBytes(siz);
             const uint16_t renderLine = uint16_t(((uint32_t(width) * renderLineBytes) + 7) >> 3);
             const uint16_t renderLrs = uint16_t((width - 1) << 2);
+            const uint16_t renderLrt = uint16_t((height - 1) << 2);
             const int32_t maxLoadedRows = std::max<int32_t>(1, int32_t(spriteMaxTexelsPerLoad(siz) / uint32_t(width)));
             const int32_t guardBudget = useYGuardRow ? 2 : 0;
             const int32_t maxCoreRows = tightStride ? std::max<int32_t>(1, maxLoadedRows - guardBudget) : 1;
+            const bool useFullReplacementHash = spriteSupportsFullReplacementHash(siz, width, height, stride, offsetS, offsetT);
+            bool fullReplacementCommandActive = false;
+
+            if (useFullReplacementHash) {
+                uint64_t replacementHash = 0;
+                const bool hasReplacement = beginFullReplacementSprite(state, rdp, fmt, siz, imageAddress, uint16_t(width), renderLine, renderLrs, renderLrt, replacementHash);
+                fullReplacementCommandActive = (replacementHash != 0);
+
+                if (hasReplacement) {
+                    const int16_t uls = flipX ? clampS16(width << 5) : 0;
+                    const int16_t ult = flipY ? clampS16(height << 5) : 0;
+
+                    rdp->setTile(G_TX_RENDERTILE, fmt, siz, renderLine, 0, 0, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    rdp->setTileReplacementHash(G_TX_RENDERTILE, replacementHash);
+                    rdp->setTileSize(G_TX_RENDERTILE, 0, 0, renderLrs, renderLrt);
+                    rdp->drawTexRect(ulx, ulyBase, effective_lrx, totalLry, G_TX_RENDERTILE, uls, ult, effective_dsdx, dtdy, false);
+                    rdp->clearTileReplacementHash(G_TX_RENDERTILE);
+                    state->endSpriteCommand();
+                    return;
+                }
+            }
+
             for (int32_t coreRowStart = 0; coreRowStart < height; coreRowStart += maxCoreRows) {
                 const int32_t coreRows = std::min<int32_t>(maxCoreRows, height - coreRowStart);
                 int32_t loadStart = coreRowStart;
@@ -249,7 +309,11 @@ namespace RT64 {
                 const int16_t uls = flipX ? clampS16((width << 5) + baseUls) : baseUls;
                 const int32_t ultBase = flipY ? (int32_t(baseUlt) + ((guardTop + coreRows) << 5)) : (int32_t(baseUlt) + (guardTop << 5));
                 const int16_t ult = clampS16(ultBase);
-                rdp->drawTexRect(ulx, chunkUly, lrx, chunkLry, G_TX_RENDERTILE, uls, ult, dsdx, dtdy, false);
+                rdp->drawTexRect(ulx, chunkUly, effective_lrx, chunkLry, G_TX_RENDERTILE, uls, ult, effective_dsdx, dtdy, false);
+            }
+
+            if (fullReplacementCommandActive) {
+                state->endSpriteCommand();
             }
         }
 
@@ -330,6 +394,20 @@ namespace RT64 {
             if ((sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPT) != 0) {
                 ult = clampS16(int32_t(sprite.imageH));
                 dtdy = clampS16(-int32_t(rawScaleH));
+            }
+
+            if ((sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPS) == 0) {
+                const FixedRect &scissorRect = rdp->scissorRectStack[rdp->scissorStackSize - 1];
+                const int32_t native_width = rdp->colorImage.width * 4;
+                const int32_t native_height = 240 * 4; // N64 native height in 4x fixed-point
+                const bool depthSourcePrim = (rdp->otherMode.zSource() == G_ZS_PRIM);
+                if (depthSourcePrim
+                    && (ulx <= 0) && (lrx >= native_width) && (scissorRect.lrx > native_width)
+                    && (uly <= 0) && (lry >= native_height)) {
+                    const int32_t old_lrx = lrx;
+                    lrx = scissorRect.lrx;
+                    dsdx = clampS16(int32_t((int64_t(dsdx) * old_lrx) / scissorRect.lrx));
+                }
             }
 
             rdp->drawTexRect(ulx, uly, lrx, lry, G_TX_RENDERTILE, uls, ult, dsdx, dtdy, false);
