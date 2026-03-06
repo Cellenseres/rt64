@@ -195,6 +195,7 @@ namespace RT64 {
         void setRectAlign(const ExtendedAlignment &extAlignment);
         void setScissorAlign(const ExtendedAlignment &extAlignment);
         void forceUpscale2D(bool force);
+        void disableUpscale2D(bool disable);
         void forceTrueBilerp(uint8_t mode);
         void forceScaleLOD(bool force);
         void clearExtended();

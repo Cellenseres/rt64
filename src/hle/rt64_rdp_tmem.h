@@ -17,6 +17,7 @@ namespace RT64 {
         std::set<uint64_t> dumpedSet;
 
         void uploadEmpty(State *state, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint64_t replacementHash);
+        void uploadRGBA32(State *state, TextureCache *textureCache, uint64_t creationFrame, uint64_t hash, const uint8_t *bytes, int bytesCount, uint16_t width, uint16_t height, uint32_t rowPitch);
         uint64_t uploadTMEM(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t byteOffset, uint16_t byteCount, uint16_t width, uint16_t height, uint32_t tlut);
         uint64_t uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut);
         void dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut);

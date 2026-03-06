@@ -62,6 +62,12 @@ namespace RT64 {
             OptionCount
         };
 
+        enum class SpriteUpscaling {
+            Upscaled,
+            Original,
+            OptionCount
+        };
+
         enum class RefreshRate {
             Original,
             Display,
@@ -95,6 +101,7 @@ namespace RT64 {
         AspectRatio extAspectRatio;
         double extAspectTarget;
         Upscale2D upscale2D;
+        SpriteUpscaling spriteUpscaling;
         bool threePointFiltering;
         RefreshRate refreshRate;
         int refreshRateTarget;
@@ -150,6 +157,11 @@ namespace RT64 {
         { UserConfiguration::Upscale2D::Original, "Original" },
         { UserConfiguration::Upscale2D::ScaledOnly, "ScaledOnly" },
         { UserConfiguration::Upscale2D::All, "All" }
+    });
+
+    NLOHMANN_JSON_SERIALIZE_ENUM(UserConfiguration::SpriteUpscaling, {
+        { UserConfiguration::SpriteUpscaling::Upscaled, "Upscaled" },
+        { UserConfiguration::SpriteUpscaling::Original, "Original" }
     });
 
     NLOHMANN_JSON_SERIALIZE_ENUM(UserConfiguration::RefreshRate, {

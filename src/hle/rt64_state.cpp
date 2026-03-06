@@ -984,7 +984,7 @@ namespace RT64 {
                     // Set whether the texture coordinates should be scaled or not based on the current configuration mode and the extended GBI flags.
                     const bool forcedUpscale2D = (flags.rect == 0) || (upscale2D == UserConfiguration::Upscale2D::All) || callDesc.extendedFlags.forceUpscale2D;
                     const bool upscaleIfScaledRect = (upscale2D == UserConfiguration::Upscale2D::ScaledOnly) && flags.rect && !callDesc.identityRectScale();
-                    flags.upscale2D = forcedUpscale2D || upscaleIfScaledRect;
+                    flags.upscale2D = !callDesc.extendedFlags.disableUpscale2D && (forcedUpscale2D || upscaleIfScaledRect);
 
                     if (proj.usesViewport()) {
                         flags.culling = (callDesc.geometryMode & callDesc.cullBothMask) != 0;
@@ -2125,6 +2125,7 @@ namespace RT64 {
                     }
 
                     genConfigChanged = ImGui::Combo("Upscale 2D Mode", reinterpret_cast<int *>(&userConfig.upscale2D), "Original\0Scaled Only\0All\0") || genConfigChanged;
+                    genConfigChanged = ImGui::Combo("Sprite Upscaling", reinterpret_cast<int *>(&userConfig.spriteUpscaling), "Upscaled\0Original\0") || genConfigChanged;
                     genConfigChanged = ImGui::Combo("Refresh Rate Mode", reinterpret_cast<int *>(&userConfig.refreshRate), "Original\0Display\0Manual\0") || genConfigChanged;
                     const bool manualRefreshRate = (userConfig.refreshRate == UserConfiguration::RefreshRate::Manual);
                     if (manualRefreshRate) {

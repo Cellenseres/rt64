@@ -63,6 +63,7 @@ namespace RT64 {
 
     struct DrawExtendedFlags {
         uint32_t forceUpscale2D : 1;
+        uint32_t disableUpscale2D : 1;
         uint32_t forceTrueBilerp : 2;
         uint32_t forceScaleLOD : 1;
     };

@@ -5,7 +5,6 @@
 #include "rt64_gbi_s2dex.h"
 
 #include <algorithm>
-#include <array>
 #include <limits>
 
 #include "../include/rt64_extended_gbi.h"
@@ -24,297 +23,10 @@ namespace RT64 {
             state->rsp->setObjRenderMode((*dl)->w1);
         }
 
-        static uint8_t spriteLoadBlockSiz(uint8_t siz) {
-            switch (siz) {
-            case G_IM_SIZ_4b:
-            case G_IM_SIZ_8b:
-            case G_IM_SIZ_16b:
-                return G_IM_SIZ_16b;
-            case G_IM_SIZ_32b:
-                return G_IM_SIZ_32b;
-            default:
-                return siz;
-            }
-        }
-
-        static uint32_t spriteSizBytes(uint8_t siz) {
-            switch (siz) {
-            case G_IM_SIZ_8b:  return 1;
-            case G_IM_SIZ_16b: return 2;
-            case G_IM_SIZ_32b: return 4;
-            default:           return 0;
-            }
-        }
-
-        static bool spriteSupportsFullReplacementHash(uint8_t siz, int32_t width, int32_t height, int32_t stride, int32_t offsetS, int32_t offsetT) {
-            if ((siz == G_IM_SIZ_4b) || (width <= 0) || (height <= 0)) {
-                return false;
-            }
-
-            // Restrict this to large contiguous sprites so replacement hashes stay useful for
-            // fullscreen/background art instead of every small UI element.
-            return (stride == width) && (offsetS == 0) && (offsetT == 0) && ((width * height) >= 16384);
-        }
-
-        static bool beginFullReplacementSprite(State *state, RDP *rdp, uint8_t fmt, uint8_t siz, uint32_t imageAddress, uint16_t width,
-            uint16_t renderLine, uint16_t renderLrs, uint16_t renderLrt, uint64_t &replacementHash)
-        {
-            rdp->setTextureImage(fmt, siz, width, imageAddress);
-            rdp->setTile(G_TX_LOADTILE, fmt, siz, renderLine, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
-            rdp->loadTileReplacementCheck(G_TX_LOADTILE, 0, 0, renderLrs, renderLrt, siz, fmt, 0, 0, replacementHash);
-            state->startSpriteCommand(replacementHash);
-            return state->ext.textureCache->hasReplacement(replacementHash);
-        }
-
-        static uint32_t spriteSizLineBytes(uint8_t siz) {
-            switch (siz) {
-            case G_IM_SIZ_8b:  return 1;
-            case G_IM_SIZ_16b: return 2;
-            case G_IM_SIZ_32b: return 2;
-            default:           return 0;
-            }
-        }
-
-        static uint32_t spriteSizShift(uint8_t siz) {
-            switch (siz) {
-            case G_IM_SIZ_4b:  return 2;
-            case G_IM_SIZ_8b:  return 1;
-            case G_IM_SIZ_16b:
-            case G_IM_SIZ_32b:
-            default:
-                return 0;
-            }
-        }
-
-        static uint32_t spriteSizIncr(uint8_t siz) {
-            switch (siz) {
-            case G_IM_SIZ_4b:  return 3;
-            case G_IM_SIZ_8b:  return 1;
-            case G_IM_SIZ_16b:
-            case G_IM_SIZ_32b:
-            default:
-                return 0;
-            }
-        }
-
-        static uint32_t spriteMaxTexelsPerLoad(uint8_t siz) {
-            switch (siz) {
-            case G_IM_SIZ_4b:  return 8192;
-            case G_IM_SIZ_8b:  return 4096;
-            case G_IM_SIZ_16b: return 2048;
-            case G_IM_SIZ_32b: return 1024;
-            default:           return 2048;
-            }
-        }
-
-        static uint16_t spriteCalcDxt(uint32_t width, uint8_t siz) {
-            if (siz == G_IM_SIZ_4b) {
-                const uint32_t txl2Words = std::max<uint32_t>(1, width / 16);
-                return uint16_t(((1U << 11) + txl2Words - 1) / txl2Words);
-            }
-
-            const uint32_t bytes = spriteSizBytes(siz);
-            const uint32_t txl2Words = std::max<uint32_t>(1, (width * bytes) / 8);
-            return uint16_t(((1U << 11) + txl2Words - 1) / txl2Words);
-        }
-
         static int16_t clampS16(int32_t v) {
             constexpr int32_t MinS16 = std::numeric_limits<int16_t>::min();
             constexpr int32_t MaxS16 = std::numeric_limits<int16_t>::max();
             return int16_t(std::clamp(v, MinS16, MaxS16));
-        }
-
-        static bool spriteCanUseLoadBlock16(int32_t width) {
-            static constexpr std::array<int32_t, 31> LoadBlock16Widths = {
-                4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 112, 128, 168,
-                192, 224, 256, 336, 384, 448, 512, 672, 768, 896, 1024, 1344, 1536,
-                1792, 2048
-            };
-
-            return std::binary_search(LoadBlock16Widths.begin(), LoadBlock16Widths.end(), width);
-        }
-
-        static bool spriteNeedsYGuardRow(int32_t sy, int32_t ulyBase) {
-            return (sy != 1024) || ((ulyBase & 0x3) != 0);
-        }
-
-        enum class SpriteLoadMethod {
-            Block,
-            Tile
-        };
-
-        static SpriteLoadMethod spriteLoadMethod(uint8_t fmt, uint8_t siz, int32_t width) {
-            if ((fmt == G_IM_FMT_RGBA) && (siz == G_IM_SIZ_16b) && spriteCanUseLoadBlock16(width)) {
-                return SpriteLoadMethod::Block;
-            }
-
-            return SpriteLoadMethod::Tile;
-        }
-
-        void sprite2DBase(State *state, DisplayList **dl) {
-            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
-            const uint8_t *spriteBytes = state->fromRDRAM(rdramAddress);
-            memcpy(state->rsp->S2D.sprite2D_buffer.data(), spriteBytes, sizeof(uSprite));
-            state->rsp->S2D.sprite2D_valid = true;
-        }
-
-        void sprite2DScaleFlip(State *state, DisplayList **dl) {
-            state->rsp->S2D.sprite2D_scale_x = std::max<uint16_t>((*dl)->p1(16, 16), 1);
-            state->rsp->S2D.sprite2D_scale_y = std::max<uint16_t>((*dl)->p1(0, 16), 1);
-            state->rsp->S2D.sprite2D_flip_x = ((*dl)->p0(8, 8) != 0) ? 1 : 0;
-            state->rsp->S2D.sprite2D_flip_y = ((*dl)->p0(0, 8) != 0) ? 1 : 0;
-        }
-
-        void sprite2DDraw(State *state, DisplayList **dl) {
-            if (!state->rsp->S2D.sprite2D_valid) {
-                return;
-            }
-
-            RDP *rdp = state->rdp.get();
-            const uSprite *sprite = reinterpret_cast<const uSprite *>(state->rsp->S2D.sprite2D_buffer.data());
-            const uint8_t fmt = sprite->sourceImageFmt;
-            const uint8_t siz = sprite->sourceImageSiz;
-            if (siz > G_IM_SIZ_32b) {
-                return;
-            }
-
-            const int32_t width = std::max<int32_t>(sprite->subImageWidth, 1);
-            const int32_t height = std::max<int32_t>(sprite->subImageHeight, 1);
-            const int32_t stride = std::max<int32_t>(sprite->stride, width);
-            const int32_t sx = std::max<int32_t>(state->rsp->S2D.sprite2D_scale_x, 1);
-            const int32_t sy = std::max<int32_t>(state->rsp->S2D.sprite2D_scale_y, 1);
-            const int32_t ulx = int16_t((*dl)->p1(16, 16));
-            const int32_t ulyBase = int16_t((*dl)->p1(0, 16));
-            const int32_t lrx = ulx + int32_t((uint64_t(width) * 4096ULL + uint32_t(sx) - 1) / uint32_t(sx));
-            const int32_t totalLry = ulyBase + int32_t((uint64_t(height) * 4096ULL + uint32_t(sy) - 1) / uint32_t(sy));
-            if (lrx <= ulx) {
-                return;
-            }
-
-            int16_t baseUls = 0;
-            int16_t baseUlt = 0;
-            uint32_t imageAddress = state->rsp->fromSegmented(sprite->sourceImage);
-            const int32_t offsetS = std::max<int32_t>(sprite->sourceImageOffsetS, 0);
-            const int32_t offsetT = std::max<int32_t>(sprite->sourceImageOffsetT, 0);
-            if (siz == G_IM_SIZ_4b) {
-                const int32_t texelOffset = offsetT * stride + offsetS;
-                imageAddress += uint32_t(texelOffset >> 1);
-                baseUls = int16_t((texelOffset & 1) ? 16 : 0);
-            }
-            else {
-                const uint32_t bytesPerTexel = spriteSizBytes(siz);
-                imageAddress += uint32_t((offsetT * stride + offsetS) * int32_t(bytesPerTexel));
-            }
-
-            const bool flipX = (state->rsp->S2D.sprite2D_flip_x != 0);
-            const bool flipY = (state->rsp->S2D.sprite2D_flip_y != 0);
-            const int16_t dsdx = clampS16(flipX ? -sx : sx);
-            const int16_t dtdy = clampS16(flipY ? -sy : sy);
-
-            int32_t effective_lrx = lrx;
-            int16_t effective_dsdx = dsdx;
-            if (!flipX) {
-                const FixedRect &scissorRect = rdp->scissorRectStack[rdp->scissorStackSize - 1];
-                const int32_t native_width = rdp->colorImage.width * 4;
-                const int32_t native_height = 240 * 4; // N64 native height in 4x fixed-point
-                const bool depthSourcePrim = (rdp->otherMode.zSource() == G_ZS_PRIM);
-                if (depthSourcePrim
-                    && (ulx <= 0) && (lrx >= native_width) && (scissorRect.lrx > native_width)
-                    && (ulyBase <= 0) && (totalLry >= native_height)) {
-                    effective_lrx = scissorRect.lrx;
-                    effective_dsdx = clampS16(int32_t((int64_t(dsdx) * lrx) / scissorRect.lrx));
-                }
-            }
-
-            const bool tightStride = (stride == width);
-            const SpriteLoadMethod loadMethod = tightStride ? spriteLoadMethod(fmt, siz, width) : SpriteLoadMethod::Tile;
-            const bool useLoadBlock = (loadMethod == SpriteLoadMethod::Block);
-            const bool useYGuardRow = spriteNeedsYGuardRow(sy, ulyBase);
-            const uint8_t loadSiz = spriteLoadBlockSiz(siz);
-            const uint16_t dxt = spriteCalcDxt(uint32_t(width), siz);
-            const uint32_t renderLineBytes = spriteSizLineBytes(siz);
-            const uint16_t renderLine = uint16_t(((uint32_t(width) * renderLineBytes) + 7) >> 3);
-            const uint16_t renderLrs = uint16_t((width - 1) << 2);
-            const uint16_t renderLrt = uint16_t((height - 1) << 2);
-            const int32_t maxLoadedRows = std::max<int32_t>(1, int32_t(spriteMaxTexelsPerLoad(siz) / uint32_t(width)));
-            const int32_t guardBudget = useYGuardRow ? 2 : 0;
-            const int32_t maxCoreRows = tightStride ? std::max<int32_t>(1, maxLoadedRows - guardBudget) : 1;
-            const bool useFullReplacementHash = spriteSupportsFullReplacementHash(siz, width, height, stride, offsetS, offsetT);
-            bool fullReplacementCommandActive = false;
-
-            if (useFullReplacementHash) {
-                uint64_t replacementHash = 0;
-                const bool hasReplacement = beginFullReplacementSprite(state, rdp, fmt, siz, imageAddress, uint16_t(width), renderLine, renderLrs, renderLrt, replacementHash);
-                fullReplacementCommandActive = (replacementHash != 0);
-
-                if (hasReplacement) {
-                    const int16_t uls = flipX ? clampS16(width << 5) : 0;
-                    const int16_t ult = flipY ? clampS16(height << 5) : 0;
-
-                    rdp->setTile(G_TX_RENDERTILE, fmt, siz, renderLine, 0, 0, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
-                    rdp->setTileReplacementHash(G_TX_RENDERTILE, replacementHash);
-                    rdp->setTileSize(G_TX_RENDERTILE, 0, 0, renderLrs, renderLrt);
-                    rdp->drawTexRect(ulx, ulyBase, effective_lrx, totalLry, G_TX_RENDERTILE, uls, ult, effective_dsdx, dtdy, false);
-                    rdp->clearTileReplacementHash(G_TX_RENDERTILE);
-                    state->endSpriteCommand();
-                    return;
-                }
-            }
-
-            for (int32_t coreRowStart = 0; coreRowStart < height; coreRowStart += maxCoreRows) {
-                const int32_t coreRows = std::min<int32_t>(maxCoreRows, height - coreRowStart);
-                int32_t loadStart = coreRowStart;
-                int32_t loadEnd = coreRowStart + coreRows;
-                if (useYGuardRow) {
-                    int32_t extraGuardBudget = std::max<int32_t>(0, maxLoadedRows - coreRows);
-                    if ((extraGuardBudget > 0) && (loadStart > 0)) {
-                        loadStart--;
-                        extraGuardBudget--;
-                    }
-
-                    if ((extraGuardBudget > 0) && (loadEnd < height)) {
-                        loadEnd++;
-                    }
-                }
-
-                const int32_t loadedRows = std::max<int32_t>(1, loadEnd - loadStart);
-                const int32_t guardTop = coreRowStart - loadStart;
-
-                uint32_t chunkAddress = imageAddress;
-                if (siz == G_IM_SIZ_4b) {
-                    chunkAddress += uint32_t((loadStart * stride) >> 1);
-                }
-                else {
-                    chunkAddress += uint32_t(loadStart * stride * int32_t(spriteSizBytes(siz)));
-                }
-
-                if (useLoadBlock) {
-                    const int32_t texelCount = width * loadedRows;
-                    const uint16_t loadLrs = uint16_t((((uint32_t(texelCount) + spriteSizIncr(siz)) >> spriteSizShift(siz)) - 1) & 0xFFF);
-                    rdp->setTextureImage(fmt, loadSiz, 1, chunkAddress);
-                    rdp->setTile(G_TX_LOADTILE, fmt, loadSiz, 0, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
-                    rdp->loadBlock(G_TX_LOADTILE, 0, 0, loadLrs, dxt);
-                }
-                else {
-                    rdp->setTextureImage(fmt, siz, uint16_t(stride), chunkAddress);
-                    rdp->setTile(G_TX_LOADTILE, fmt, siz, renderLine, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
-                    rdp->loadTile(G_TX_LOADTILE, 0, 0, renderLrs, uint16_t((loadedRows - 1) << 2));
-                }
-
-                rdp->setTile(G_TX_RENDERTILE, fmt, siz, renderLine, 0, 0, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
-                rdp->setTileSize(G_TX_RENDERTILE, 0, 0, renderLrs, uint16_t((loadedRows - 1) << 2));
-
-                const int32_t chunkUly = ulyBase + int32_t((uint64_t(coreRowStart) * 4096ULL + uint32_t(sy) - 1) / uint32_t(sy));
-                const int32_t chunkLry = ulyBase + int32_t((uint64_t(coreRowStart + coreRows) * 4096ULL + uint32_t(sy) - 1) / uint32_t(sy));
-                const int16_t uls = flipX ? clampS16((width << 5) + baseUls) : baseUls;
-                const int32_t ultBase = flipY ? (int32_t(baseUlt) + ((guardTop + coreRows) << 5)) : (int32_t(baseUlt) + (guardTop << 5));
-                const int16_t ult = clampS16(ultBase);
-                rdp->drawTexRect(ulx, chunkUly, effective_lrx, chunkLry, G_TX_RENDERTILE, uls, ult, effective_dsdx, dtdy, false);
-            }
-
-            if (fullReplacementCommandActive) {
-                state->endSpriteCommand();
-            }
         }
 
         static void setObjSpriteTile(State *state, const uObjSprite &sprite) {
@@ -501,7 +213,7 @@ namespace RT64 {
         }
 
         void bg1CycTMEMLoadTile(RDP &rdp, const uObjScaleBg_t &scaleBg, uint32_t imagePtr, uint16_t imageSrcWsize, int16_t loadLines, int16_t tmemSH) {
-            // TODO: Does it make sense that when using 32-bit images, the lrt is 0?
+            // Preserve the current hardware-observed 32-bit behavior until a more accurate reference is available.
             const bool is32Bits = (scaleBg.imageSiz == G_IM_SIZ_32b);
             uint8_t textureImageSiz = is32Bits ? G_IM_SIZ_32b : G_IM_SIZ_16b;
             uint16_t tileLrt = is32Bits ? 0 : ((loadLines << 2) - 1);
@@ -593,14 +305,11 @@ namespace RT64 {
             RDP *rdp = state->rdp.get();
             RSP *rsp = state->rsp.get();
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
-            // TODO load this into the S2D struct buffer for a more accurate implementation in case there's ever command state bleed.
             const uObjBg *bgObject = reinterpret_cast<const uObjBg *>(state->fromRDRAM(rdramAddress));
             const uObjBg_t &bg = bgObject->bg;
             const uObjScaleBg_t &scaleBg = bgObject->scaleBg;
 
-            // Validate the image loading method is one of the two supported methods. It's worth noting 
-            // that despite the load block method being documented, it doesn't actually work in the retail
-            // microcode and it should therefore be treated as load tile as well.
+            // Retail microcode handles the documented load-block path like load-tile for this command.
             assert((bg.imageLoad == S2DEX_G_BGLT_LOADBLOCK) || (bg.imageLoad == S2DEX_G_BGLT_LOADTILE));
 
             // The scale should at least be 1.
@@ -628,8 +337,6 @@ namespace RT64 {
                 frameX0 += frameWmax;
             }
 
-            // TODO: This scissor state probably needs to be pulled from the one tracked
-            // by the RSP instead of the RDP, which is not currently implemented yet.
             const FixedRect &scissorRect = rdp->scissorRectStack[rdp->scissorStackSize - 1];
             int32_t scissorX0 = scissorRect.ulx;
             int32_t scissorY0 = scissorRect.uly;
@@ -662,14 +369,8 @@ namespace RT64 {
             // The image size needs to be extended when using bilerp.
             int16_t usesBilerp = (rsp->objRenderMode & S2DEX_G_OBJRM_BILERP) ? 1 : 0;
 
-            // Some games will incorrectly set this flag despite not actually using bilerp during drawing. The side effect is that it'll end
-            // up using a method of loading textures that makes it almost impossible for the emulation to detect tiles that can be upscaled due
-            // to the various shenanigans the microcode has to do to load an image that is bigger than what it really is.
-            // 
-            // This enhancement falls under the category of a developer intended fix because there's a clear mismatch between the end result
-            // and the loading method used to achieve it, as evidenced by the current state of the RDP. The end result is it makes the loading
-            // logic much simpler and allows the emulation to upscale the tiles properly.
-            //
+            // Some titles leave the bilerp flag enabled while sampling point-filtered output. When the
+            // enhancement is active, prefer the RDP filter state so the load path matches the actual draw.
             const bool rdpUsesBilerp = (rdp->otherMode.textFilt() == G_TF_BILERP);
             const bool bilerpFixEnabled = state->ext.enhancementConfig->s2dex.fixBilerpMismatch;
             if (usesBilerp && !rdpUsesBilerp && bilerpFixEnabled) {
@@ -784,9 +485,7 @@ namespace RT64 {
             rdp->setTile(G_TX_LOADTILE, G_IM_FMT_RGBA, loadSiz, tmemSliceWmax, 0, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
             rdp->setTile(G_TX_RENDERTILE, scaleBg.imageFmt, scaleBg.imageSiz, tmemSliceWmax, 0, uint8_t(scaleBg.imagePal), G_TX_WRAP | G_TX_MIRROR, G_TX_WRAP | G_TX_MIRROR, 0xF, 0xF, 0, 0);
 
-            // Attempt to use a single tile instead to draw the entire rect at once if there's a framebuffer copy available.
-            // If it fails to find a possible tile copy, fall back to the regular approach.
-            // FIXME: The rest of the code should still run to account for state bleeding without drawing any rectangles.
+            // Prefer the single-tile fast path when a matching framebuffer-backed texture is available.
             if (state->ext.enhancementConfig->s2dex.framebufferFastPath) {
                 int16_t uls = imageS;
                 int16_t ult = imageT;
@@ -859,8 +558,6 @@ namespace RT64 {
         }
         
         void bgCopy(State *state, DisplayList **dl) {
-            // TODO: Reimplement more accurately to match the microcode.
-
 #       ifdef LOG_BGRECT_METHODS
             RT64_LOG_PRINTF("bgCopy::start(0x%08X)", (*dl)->w1);
 #       endif
@@ -868,27 +565,22 @@ namespace RT64 {
             RDP *rdp = state->rdp.get();
             RSP* rsp = state->rsp.get();
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
-            // TODO load this into the S2D struct buffer for a more accurate implementation in case there's ever command state bleed.
             const uObjBg *bgObject = reinterpret_cast<const uObjBg *>(state->fromRDRAM(rdramAddress));
             const uObjBg_t &bg = bgObject->bg;
-            assert(bg.imageLoad == S2DEX_G_BGLT_LOADTILE); // TODO: Only the load tile version is implemented.
+            assert(bg.imageLoad == S2DEX_G_BGLT_LOADTILE);
             
-            const uint16_t TMEMAddress = 0;
+            constexpr uint16_t TMEMAddress = 0;
             const uint8_t lineShiftOffset = (bg.imageSiz == G_IM_SIZ_32b) ? 1 : 0;
             const uint16_t bgLine = bg.imageW >> (2 + bg.imageSiz - lineShiftOffset);
             const uint16_t dsdx = 4 << 10;
             const uint16_t dsdy = 4 << 8;
-            const uint16_t lrSubstract = 4;
-            const uint16_t bgRectLrs = bg.imageW - lrSubstract;
-            const uint32_t savedOtherModeH = rdp->otherMode.H;
+            const uint16_t lrSubtract = 4;
+            const uint16_t bgRectLrs = bg.imageW - lrSubtract;
             rsp->setTextureImage(bg.imageFmt, bg.imageSiz, bg.imageW >> 2, state->rsp->fromSegmented(bg.imageAddress));
             rdp->setTile(G_TX_LOADTILE, bg.imageFmt, bg.imageSiz, bgLine, TMEMAddress, static_cast<uint8_t>(bg.imagePal), 0, 0, 0, 0, 0, 0);
             rdp->setTile(G_TX_RENDERTILE, bg.imageFmt, bg.imageSiz, bgLine, TMEMAddress, static_cast<uint8_t>(bg.imagePal), 0, 0, 0, 0, 0, 0);
 
-            // Attempt to use a single tile instead to draw the entire rect at once if there's a framebuffer copy available.
-            // If it fails to find a possible tile copy, fall back to the regular approach.
-            // FIXME: The rest of the code should still run to account for state bleeding without drawing any rectangles.
-            uint16_t bgRectLrt = bg.imageH - lrSubstract;
+            uint16_t bgRectLrt = bg.imageH - lrSubtract;
             uint64_t replacementHash = 0;
             if (state->ext.enhancementConfig->s2dex.framebufferFastPath) {
                 bool replacementCheck = rdp->loadTileReplacementCheck(G_TX_LOADTILE, 0, 0, bgRectLrs, bgRectLrt, bg.imageSiz, bg.imageFmt, bg.imageLoad, bg.imagePal, replacementHash);
@@ -898,22 +590,37 @@ namespace RT64 {
                     rdp->setTileReplacementHash(G_TX_RENDERTILE, replacementHash);
                     rdp->setTileSize(G_TX_RENDERTILE, 0, 0, bgRectLrs, bgRectLrt);
                     rdp->loadTile(G_TX_LOADTILE, 0, 0, bgRectLrs, bgRectLrt);
-                    rdp->drawTexRect(bg.frameX, bg.frameY, bg.frameX + bg.frameW - lrSubstract, bg.frameY + bg.frameH - lrSubstract, G_TX_RENDERTILE, 0, 0, dsdx, dsdy, false);
+                    rdp->drawTexRect(bg.frameX, bg.frameY, bg.frameX + bg.frameW - lrSubtract, bg.frameY + bg.frameH - lrSubtract, G_TX_RENDERTILE, 0, 0, dsdx, dsdy, false);
                     rdp->clearTileReplacementHash(G_TX_RENDERTILE);
                     state->endSpriteCommand();
                     return;
                 }
             }
 
-            const uint32_t Division = (bg.imageFmt == G_IM_FMT_CI) ? 2 : 1;
-            const uint16_t bgRectCount = bg.imageH / (bg.tmemH / Division); // TODO: Check for remaining pixels for the last Texrect.
-            bgRectLrt = (bg.tmemH / Division) - lrSubstract;
-            rdp->setTileSize(G_TX_RENDERTILE, 0, 0, bgRectLrs, bgRectLrt);
+            const uint32_t division = (bg.imageFmt == G_IM_FMT_CI) ? 2 : 1;
+            const uint16_t sliceHeight = bg.tmemH / division;
+            if (sliceHeight <= lrSubtract) {
+                state->endSpriteCommand();
+                return;
+            }
 
-            for (uint16_t r = 0; r < bgRectCount; r++) {
-                const uint16_t bgRectUlt = r * (bg.tmemH / Division);
-                rdp->loadTile(G_TX_LOADTILE, 0, bgRectUlt, bgRectLrs, bgRectUlt + bgRectLrt);
-                rdp->drawTexRect(bg.frameX, bg.frameY + bgRectUlt, bg.frameX + bg.frameW - lrSubstract, bg.frameY + bgRectUlt + bgRectLrt, G_TX_RENDERTILE, 0, 0, dsdx, dsdy, false);
+            const uint16_t sliceCount = bg.imageH / sliceHeight;
+            const uint16_t remainderHeight = bg.imageH % sliceHeight;
+            const uint16_t fullSliceLrt = sliceHeight - lrSubtract;
+
+            rdp->setTileSize(G_TX_RENDERTILE, 0, 0, bgRectLrs, fullSliceLrt);
+            for (uint16_t sliceIndex = 0; sliceIndex < sliceCount; sliceIndex++) {
+                const uint16_t bgRectUlt = sliceIndex * sliceHeight;
+                rdp->loadTile(G_TX_LOADTILE, 0, bgRectUlt, bgRectLrs, bgRectUlt + fullSliceLrt);
+                rdp->drawTexRect(bg.frameX, bg.frameY + bgRectUlt, bg.frameX + bg.frameW - lrSubtract, bg.frameY + bgRectUlt + fullSliceLrt, G_TX_RENDERTILE, 0, 0, dsdx, dsdy, false);
+            }
+
+            if (remainderHeight > lrSubtract) {
+                const uint16_t remainderUlt = sliceCount * sliceHeight;
+                const uint16_t remainderLrt = remainderHeight - lrSubtract;
+                rdp->setTileSize(G_TX_RENDERTILE, 0, 0, bgRectLrs, remainderLrt);
+                rdp->loadTile(G_TX_LOADTILE, 0, remainderUlt, bgRectLrs, remainderUlt + remainderLrt);
+                rdp->drawTexRect(bg.frameX, bg.frameY + remainderUlt, bg.frameX + bg.frameW - lrSubtract, bg.frameY + remainderUlt + remainderLrt, G_TX_RENDERTILE, 0, 0, dsdx, dsdy, false);
             }
 
             state->endSpriteCommand();
@@ -924,26 +631,18 @@ namespace RT64 {
         }
 
         void readS2DStruct(State *state, uint32_t ptr, uint32_t loadSize) {
-            // Convert the segmented obj pointer
             uint32_t rdramAddress = state->rsp->fromSegmentedMasked(ptr);
-            // Mask the address as the RSP DMA hardware would
             rdramAddress &= RSP_DMA_MASK;
-            // Truncate the load size as the ucode does
             loadSize &= 0xFF;
-            // Load the struct from RDRAM into the S2D struct buffer
             memcpy(state->rsp->S2D.struct_buffer.data(), state->fromRDRAM(rdramAddress), loadSize);
         }
 
         void doLoadTxtr(State *state, const uObjTxtr *obj) {
-            // Not sure what this does yet so it's just left as the original register name.
-            // Maybe used for tracking what the most recent command was so it can insert syncs as needed?
+            // Track the load pipeline status using the original microcode register field.
             int32_t r1 = state->rsp->S2D.data_02AE;
 
             const uint16_t sid = uint16_t(uint8_t(obj->block.sid));
-            // Must be divisible by 4 and no more than 12 to work correctly.
-            // Technically the RSP does support unaligned reads/writes, so perfect simulation would require ditching the divisibility
-            // requirement and handling those cases correctly. Handling values above 12 is basically impossible because it would
-            // depend on dmem overrun.
+            // Retail microcode only uses aligned SIDs within the documented range.
             const bool validSid = ((sid <= S2DEX_STATUS_MAX_SID) && ((sid & S2DEX_STATUS_SID_ALIGNMENT_MASK) == 0));
             assert(validSid);
             if (!validSid) {
@@ -952,12 +651,9 @@ namespace RT64 {
 
             const uint32_t mask = obj->block.mask;
             const uint32_t flag = obj->block.flag;
-            // Get the status for the given id.
             uint32_t status = state->rsp->S2D.statuses[sid / 4];
 
-            // Skip the load if the masked status is equal to the provided flag.
             if ((status & mask) != flag) {
-                // Update the status for the given id.
                 state->rsp->S2D.statuses[sid / 4] = (status & ~mask) | (flag & mask);
                 state->rsp->S2D.data_02AE = -127;
 
@@ -1011,10 +707,8 @@ namespace RT64 {
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxtr::start(0x%08X)", (*dl)->w1);
         #endif
-            // Load the struct from rdram
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
             
-            // Execute the texture load
             const uObjTxSprite *obj = reinterpret_cast<const uObjTxSprite *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
         #ifdef LOG_LOADTXTR_METHODS
@@ -1026,10 +720,8 @@ namespace RT64 {
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxSprite::start(0x%08X)", (*dl)->w1);
         #endif
-            // Load the struct from rdram
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
             
-            // Execute the texture load
             const uObjTxSpriteFull* obj = reinterpret_cast<const uObjTxSpriteFull *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
             drawObjRectLike(state, obj->sprite, true);
@@ -1042,10 +734,8 @@ namespace RT64 {
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxRect::start(0x%08X)", (*dl)->w1);
         #endif
-            // Load the struct from rdram
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
             
-            // Execute the texture load
             const uObjTxSpriteFull* obj = reinterpret_cast<const uObjTxSpriteFull *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
             drawObjRectLike(state, obj->sprite, false);
@@ -1058,10 +748,8 @@ namespace RT64 {
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxRectR::start(0x%08X)", (*dl)->w1);
         #endif
-            // Load the struct from rdram
             readS2DStruct(state, (*dl)->w1, ((*dl)->w0 & 0xFFFFFF) + 1);
 
-            // Execute the texture load
             const uObjTxSpriteFull* obj = reinterpret_cast<const uObjTxSpriteFull *>(state->rsp->S2D.struct_buffer.data());
             doLoadTxtr(state, &obj->txtr);
             drawObjRectLike(state, obj->sprite, true);
@@ -1093,9 +781,6 @@ namespace RT64 {
             gbi->map[S2DEX_G_OBJ_RECTANGLE] = &objRectangleOrMoveMem;
             gbi->map[S2DEX_G_OBJ_SPRITE] = &objSpriteOrVertex;
             gbi->map[S2DEX_G_OBJ_MOVEMEM] = &objMoveMem;
-            gbi->map[F3D_G_SPRITE2D_BASE] = &sprite2DBase;
-            gbi->map[F3D_G_CULLDL] = &sprite2DScaleFlip;
-            gbi->map[F3D_G_POPMTX] = &sprite2DDraw;
             gbi->map[F3D_G_TEXTURE] = &GBI_F3D::texture;
             gbi->map[F3D_G_SETGEOMETRYMODE] = &GBI_F3D::setGeometryMode;
             gbi->map[F3D_G_CLEARGEOMETRYMODE] = &GBI_F3D::clearGeometryMode;

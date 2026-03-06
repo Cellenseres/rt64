@@ -1061,6 +1061,11 @@ namespace RT64 {
         extended.drawExtendedFlags.forceUpscale2D = force;
         state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
     }
+
+    void RDP::disableUpscale2D(bool disable) {
+        extended.drawExtendedFlags.disableUpscale2D = disable;
+        state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
+    }
     
     void RDP::forceTrueBilerp(uint8_t mode) {
         extended.drawExtendedFlags.forceTrueBilerp = mode;

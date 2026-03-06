@@ -22,6 +22,7 @@ namespace RT64 {
         j["extAspectRatio"] = cfg.extAspectRatio;
         j["extAspectTarget"] = cfg.extAspectTarget;
         j["upscale2D"] = cfg.upscale2D;
+        j["spriteUpscaling"] = cfg.spriteUpscaling;
         j["threePointFiltering"] = cfg.threePointFiltering;
         j["refreshRate"] = cfg.refreshRate;
         j["refreshRateTarget"] = cfg.refreshRateTarget;
@@ -45,6 +46,7 @@ namespace RT64 {
         cfg.extAspectRatio = j.value("extAspectRatio", defaultCfg.extAspectRatio);
         cfg.extAspectTarget = j.value("extAspectTarget", defaultCfg.extAspectTarget);
         cfg.upscale2D = j.value("upscale2D", defaultCfg.upscale2D);
+        cfg.spriteUpscaling = j.value("spriteUpscaling", defaultCfg.spriteUpscaling);
         cfg.threePointFiltering = j.value("threePointFiltering", defaultCfg.threePointFiltering);
         cfg.refreshRate = j.value("refreshRate", defaultCfg.refreshRate);
         cfg.refreshRateTarget = j.value("refreshRateTarget", defaultCfg.refreshRateTarget);
@@ -76,6 +78,7 @@ namespace RT64 {
         extAspectRatio = AspectRatio::Original;
         extAspectTarget = 16.0f / 9.0f;
         upscale2D = Upscale2D::ScaledOnly;
+        spriteUpscaling = SpriteUpscaling::Upscaled;
         threePointFiltering = true;
         refreshRate = RefreshRate::Original;
         refreshRateTarget = 60;
@@ -94,6 +97,7 @@ namespace RT64 {
         clampEnum<AspectRatio>(aspectRatio);
         clampEnum<AspectRatio>(extAspectRatio);
         clampEnum<Upscale2D>(upscale2D);
+        clampEnum<SpriteUpscaling>(spriteUpscaling);
         clampEnum<RefreshRate>(refreshRate);
         clampEnum<InternalColorFormat>(internalColorFormat);
         clampEnum<HardwareResolve>(hardwareResolve);

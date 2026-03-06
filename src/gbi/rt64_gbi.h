@@ -25,6 +25,7 @@ namespace RT64 {
         F3DEX,
         F3DEX2,
         F3DZEX2,
+        S2D,
         S2DEX,
         S2DEX2,
         L3DEX2,

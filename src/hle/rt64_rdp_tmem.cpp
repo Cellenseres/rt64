@@ -23,6 +23,13 @@ namespace RT64 {
         }
     }
 
+    void TextureManager::uploadRGBA32(State *state, TextureCache *textureCache, uint64_t creationFrame, uint64_t hash, const uint8_t *bytes, int bytesCount, uint16_t width, uint16_t height, uint32_t rowPitch) {
+        if (hashSet.find(hash) == hashSet.end()) {
+            hashSet.insert(hash);
+            textureCache->queueGPUUploadRGBA32(hash, creationFrame, bytes, bytesCount, width, height, rowPitch);
+        }
+    }
+
     uint64_t TextureManager::uploadTMEM(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t byteOffset, uint16_t byteCount, uint16_t width, uint16_t height, uint32_t tlut) {
         XXH3_state_t xxh3;
         XXH3_64bits_reset(&xxh3);

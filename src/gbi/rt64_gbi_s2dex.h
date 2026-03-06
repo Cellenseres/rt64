@@ -179,18 +179,6 @@ namespace RT64 {
             uint16_t baseScaleX;
         };
 
-        struct uSprite {
-            uint32_t sourceImage;
-            uint32_t tlut;
-            int16_t subImageWidth;
-            int16_t stride;
-            uint8_t sourceImageSiz;
-            uint8_t sourceImageFmt;
-            int16_t subImageHeight;
-            int16_t sourceImageOffsetT;
-            int16_t sourceImageOffsetS;
-            uint8_t padding[4];
-        };
 #pragma pack(pop)
 
         inline bool isObjDma0Command(const DisplayList *dl) {
@@ -221,9 +209,6 @@ namespace RT64 {
         }
 
         void objRenderMode(State *state, DisplayList **dl);
-        void sprite2DBase(State *state, DisplayList **dl);
-        void sprite2DScaleFlip(State *state, DisplayList **dl);
-        void sprite2DDraw(State *state, DisplayList **dl);
         void moveWord(State *state, DisplayList **dl);
         void objMoveMem(State *state, DisplayList **dl);
         void objRectangle(State *state, DisplayList **dl);
