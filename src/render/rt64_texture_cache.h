@@ -35,14 +35,22 @@ namespace interop {
 };
 
 namespace RT64 {
+    enum class TextureUploadType {
+        TMEM,
+        RGBA32
+    };
+
     struct TextureUpload {
+        TextureUploadType type = TextureUploadType::TMEM;
         uint64_t hash;
         uint64_t creationFrame;
         uint32_t width;
         uint32_t height;
+        uint32_t rowPitch = 0;
         uint32_t tlut;
         LoadTile loadTile;
         std::vector<uint8_t> bytesTMEM;
+        std::vector<uint8_t> bytesRGBA32;
         bool decodeTMEM;
     };
 
@@ -234,6 +242,7 @@ namespace RT64 {
         ~TextureCache();
         void uploadThreadLoop();
         void queueGPUUploadTMEM(uint64_t hash, uint64_t creationFrame, const uint8_t *bytes, int bytesCount, int width, int height, uint32_t tlut, const LoadTile &loadTile, bool decodeTMEM);
+        void queueGPUUploadRGBA32(uint64_t hash, uint64_t creationFrame, const uint8_t *bytes, int bytesCount, int width, int height, uint32_t rowPitch);
         void waitForGPUUploads();
         void addResolvedPaths(uint64_t hash, uint32_t width, uint32_t height, uint32_t tlut, const LoadTile &loadTile, const std::vector<uint8_t> &bytesTMEM, bool decodeTMEM, std::vector<ReplacementResolvedPath> &resolvedPaths, uint64_t exclusiveDbHash = 0);
         bool useTexture(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex, interop::float2 &textureScale, interop::float3 &textureDimensions, bool &textureReplaced, bool &hasMipmaps, bool &shiftedByHalf);

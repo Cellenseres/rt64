@@ -301,9 +301,11 @@ namespace RT64 {
         }
 
         textureIndex = it->second;
-        textureReplaced = replacementMapEnabled && (textureReplacements[textureIndex] != nullptr);
+        const Texture *baseTexture = textures[textureIndex];
+        const bool hasReplacement = replacementMapEnabled && (textureReplacements[textureIndex] != nullptr);
+        textureReplaced = hasReplacement || ((baseTexture != nullptr) && baseTexture->replacementLike);
 
-        if (textureReplaced) {
+        if (hasReplacement) {
             textureScale = textureScales[textureIndex];
             textureDimensions = cachedTextureReplacementDimensions[textureIndex];
             hasMipmaps = (textureReplacements[textureIndex]->mipmaps > 1);
@@ -311,6 +313,7 @@ namespace RT64 {
         }
         else {
             textureDimensions = cachedTextureDimensions[textureIndex];
+            hasMipmaps = (baseTexture != nullptr) && (baseTexture->mipmaps > 1);
         }
 
         // Remove the existing entry from the list if it exists.
@@ -980,6 +983,7 @@ namespace RT64 {
         std::vector<RenderTextureBarrier> beforeDecodeBarriers;
         std::vector<RenderTextureBarrier> afterDecodeBarriers;
         std::vector<uint8_t> replacementBytes;
+        std::vector<std::unique_ptr<RenderBuffer>> rgba32UploadResources;
 
         while (uploadThreadRunning) {
             resolvedPathQueueCopy.clear();
@@ -987,6 +991,7 @@ namespace RT64 {
             beforeCopyBarriers.clear();
             beforeDecodeBarriers.clear();
             afterDecodeBarriers.clear();
+            rgba32UploadResources.clear();
 
             // Check the top of the queue or wait if it's empty.
             {
@@ -1067,29 +1072,45 @@ namespace RT64 {
                     newTexture->creationFrame = upload.creationFrame;
                     textureMapAdditions.emplace_back(TextureMapAddition{ upload.hash, newTexture });
 
-                    newTexture->format = RenderFormat::R8_UINT;
-                    newTexture->width = upload.width;
-                    newTexture->height = upload.height;
-                    newTexture->tmem = copyWorker->device->createTexture(RenderTextureDesc::Texture1D(std::max(uint32_t(upload.bytesTMEM.size()), 1U), 1, newTexture->format));
-                    newTexture->tmem->setName("Texture Cache TMEM #" + std::to_string(TMEMGlobalCounter++));
-                    newTexture->bytesTMEM = upload.bytesTMEM;
-                    newTexture->loadTile = upload.loadTile;
-                    newTexture->tlut = upload.tlut;
-                    newTexture->decodeTMEM = upload.decodeTMEM;
-
-                    if (!upload.bytesTMEM.empty()) {
-                        void *dstData = tmemUploadResources[i]->map();
-                        memcpy(dstData, upload.bytesTMEM.data(), upload.bytesTMEM.size());
-                        tmemUploadResources[i]->unmap();
+                    if (upload.type == TextureUploadType::RGBA32) {
+                        newTexture->replacementLike = true;
+                        rgba32UploadResources.emplace_back();
+                        TextureCache::setRGBA32(newTexture, copyWorker->device, copyWorker->commandList.get(),
+                            upload.bytesRGBA32.data(), upload.bytesRGBA32.size(), upload.width, upload.height, upload.rowPitch,
+                            rgba32UploadResources.back(), uploadResourcePool.get(), &uploadResourcePoolMutex);
+                        afterDecodeBarriers.emplace_back(newTexture->texture.get(), RenderTextureLayout::SHADER_READ);
                     }
+                    else {
+                        newTexture->format = RenderFormat::R8_UINT;
+                        newTexture->width = upload.width;
+                        newTexture->height = upload.height;
+                        newTexture->tmem = copyWorker->device->createTexture(RenderTextureDesc::Texture1D(std::max(uint32_t(upload.bytesTMEM.size()), 1U), 1, newTexture->format));
+                        newTexture->tmem->setName("Texture Cache TMEM #" + std::to_string(TMEMGlobalCounter++));
+                        newTexture->bytesTMEM = upload.bytesTMEM;
+                        newTexture->loadTile = upload.loadTile;
+                        newTexture->tlut = upload.tlut;
+                        newTexture->decodeTMEM = upload.decodeTMEM;
 
-                    beforeCopyBarriers.emplace_back(newTexture->tmem.get(), RenderTextureLayout::COPY_DEST);
+                        if (!upload.bytesTMEM.empty()) {
+                            void *dstData = tmemUploadResources[i]->map();
+                            memcpy(dstData, upload.bytesTMEM.data(), upload.bytesTMEM.size());
+                            tmemUploadResources[i]->unmap();
+                        }
+
+                        beforeCopyBarriers.emplace_back(newTexture->tmem.get(), RenderTextureLayout::COPY_DEST);
+                    }
                 }
 
-                copyWorker->commandList->barriers(RenderBarrierStage::COPY, beforeCopyBarriers);
+                if (!beforeCopyBarriers.empty()) {
+                    copyWorker->commandList->barriers(RenderBarrierStage::COPY, beforeCopyBarriers);
+                }
 
                 for (size_t i = 0; i < queueSize; i++) {
                     const TextureUpload &upload = queueCopy[i];
+                    if (upload.type == TextureUploadType::RGBA32) {
+                        continue;
+                    }
+
                     const uint32_t byteCount = uint32_t(upload.bytesTMEM.size());
                     Texture *dstTexture = textureMapAdditions[i].texture;
                     if (byteCount > 0) {
@@ -1262,6 +1283,7 @@ namespace RT64 {
         assert(!decodeTMEM || ((width > 0) && (height > 0)));
 
         TextureUpload newUpload;
+        newUpload.type = TextureUploadType::TMEM;
         newUpload.hash = hash;
         newUpload.creationFrame = creationFrame;
         newUpload.width = width;
@@ -1274,6 +1296,31 @@ namespace RT64 {
         {
             std::unique_lock queueLock(uploadQueueMutex);
             uploadQueue.emplace_back(newUpload);
+        }
+
+        uploadQueueChanged.notify_all();
+    }
+
+    void TextureCache::queueGPUUploadRGBA32(uint64_t hash, uint64_t creationFrame, const uint8_t *bytes, int bytesCount, int width, int height, uint32_t rowPitch) {
+        assert(bytes != nullptr);
+        assert(bytesCount > 0);
+        assert(width > 0);
+        assert(height > 0);
+        assert(rowPitch >= (uint32_t(width) * 4U));
+
+        TextureUpload newUpload;
+        newUpload.type = TextureUploadType::RGBA32;
+        newUpload.hash = hash;
+        newUpload.creationFrame = creationFrame;
+        newUpload.width = width;
+        newUpload.height = height;
+        newUpload.rowPitch = rowPitch;
+        newUpload.bytesRGBA32 = std::vector<uint8_t>(bytes, bytes + bytesCount);
+        newUpload.decodeTMEM = false;
+
+        {
+            std::unique_lock queueLock(uploadQueueMutex);
+            uploadQueue.emplace_back(std::move(newUpload));
         }
 
         uploadQueueChanged.notify_all();

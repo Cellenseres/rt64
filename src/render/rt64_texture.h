@@ -21,5 +21,6 @@ namespace RT64 {
         uint64_t memorySize = 0;
         std::vector<uint8_t> bytesTMEM;
         bool decodeTMEM = false;
+        bool replacementLike = false;
     };
 };
